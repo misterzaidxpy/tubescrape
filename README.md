@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/misterzaidxpy/tubescrape/main/assets/ts-logo.png" alt="TubeScrape logo" width="160">
+</p>
+
 <h1 align="center">TubeScrape</h1>
 
 <p align="center">
@@ -7,13 +11,13 @@
 <p align="center">
   <a href="https://pypi.org/project/tubescrape/"><img src="https://img.shields.io/pypi/v/tubescrape.svg?style=flat-square&color=blue" alt="PyPI version"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue.svg?style=flat-square" alt="Python versions"></a>
-  <a href="https://github.com/zaidkx37/tubescrape/actions"><img src="https://img.shields.io/github/actions/workflow/status/zaidkx37/tubescrape/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/misterzaidxpy/tubescrape/actions"><img src="https://img.shields.io/github/actions/workflow/status/misterzaidxpy/tubescrape/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License: MIT"></a>
   <a href="https://pypi.org/project/tubescrape/"><img src="https://img.shields.io/pypi/dm/tubescrape?style=flat-square&color=orange&label=downloads" alt="Downloads"></a>
 </p>
 
 <p align="center">
-  <a href="https://zaidkx37.github.io/tubescrape/"><b>Documentation</b></a> · <a href="https://pypi.org/project/tubescrape/"><b>PyPI</b></a> · <a href="https://github.com/zaidkx37/tubescrape/issues"><b>Issues</b></a>
+  <a href="https://misterzaidxpy.github.io/tubescrape/"><b>Documentation</b></a> · <a href="https://pypi.org/project/tubescrape/"><b>PyPI</b></a> · <a href="https://github.com/misterzaidxpy/tubescrape/issues"><b>Issues</b></a>
 </p>
 
 ---
@@ -108,11 +112,11 @@ Swagger docs at `http://localhost:8000/docs`.
 
 For complete API reference, all parameters, return types, code examples, and advanced usage:
 
-**[Read the full documentation](https://zaidkx37.github.io/tubescrape/)**
+**[Read the full documentation](https://misterzaidxpy.github.io/tubescrape/)**
 
 ## Warning
 
-This library uses YouTube's undocumented InnerTube API. It may break if YouTube changes their internal API. If it does, please [open an issue](https://github.com/zaidkx37/tubescrape/issues).
+This library uses YouTube's undocumented InnerTube API. It may break if YouTube changes their internal API. If it does, please [open an issue](https://github.com/misterzaidxpy/tubescrape/issues).
 
 ## License
 

@@ -56,10 +56,10 @@ dev = [
 tubescrape = "tubescrape.cli.app:main"
 
 [project.urls]
-Homepage = "https://github.com/zaidkx37/tubescrape"
-Repository = "https://github.com/zaidkx37/tubescrape"
-Issues = "https://github.com/zaidkx37/tubescrape/issues"
-Documentation = "https://github.com/zaidkx37/tubescrape/blob/main/docs/guide.md"
+Homepage = "https://github.com/misterzaidxpy/tubescrape"
+Repository = "https://github.com/misterzaidxpy/tubescrape"
+Issues = "https://github.com/misterzaidxpy/tubescrape/issues"
+Documentation = "https://github.com/misterzaidxpy/tubescrape/blob/main/docs/guide.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tubescrape"]
