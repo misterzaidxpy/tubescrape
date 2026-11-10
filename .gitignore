@@ -56,3 +56,12 @@ debug_*.json
 
 # social
 social/
+
+# playwright mcp
+.playwright-mcp/
+
+# docs (internal notes, not for the public repo)
+/apify/
+
+# apify actor wrapper (kept private, deployed via apify push)
+/actor/
