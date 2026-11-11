@@ -31,6 +31,8 @@
 - **Sync and async** API, proxy rotation, and a single dependency (`httpx`)
 - Every method accepts **URLs, IDs, or @handles** interchangeably
 
+> **Want it as a hosted API instead?** The same engine runs as a managed [Apify actor](https://apify.com/misterzaid.py/youtube-scraper) with proxies and rate limits handled for you. Call it from any language in a few lines, or use the point-and-click UI. See [the hosted version](#hosted-version-no-code-or-api) below.
+
 ## Install
 
 ```bash
@@ -198,11 +200,27 @@ tubescrape serve                    # localhost:8000
 
 Swagger docs at `http://localhost:8000/docs`.
 
-## No code? Use the hosted version
+## Hosted version: no-code or API
 
 Don't want to manage Python, proxies, or rate limits? The same engine runs as a hosted scraper on Apify with a point-and-click UI, scheduling, and exports to JSON/CSV/Excel:
 
 **[YouTube Scraper with Transcripts & Comments](https://apify.com/misterzaid.py/youtube-scraper)**
+
+It is also a hosted API. Call it from code with the Apify client (`pip install apify-client`):
+
+```python
+from apify_client import ApifyClient
+
+client = ApifyClient("YOUR_APIFY_TOKEN")
+run = client.actor("misterzaid.py/youtube-scraper").call(run_input={
+    "searchQueries": ["python tutorial"],
+    "maxResults": 50,
+    "downloadTranscripts": True,
+})
+items = client.dataset(run["defaultDatasetId"]).list_items().items
+```
+
+Proxies, retries, and YouTube's rate limits are handled server-side, and you pay per result.
 
 ## How it works
 
