@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+from urllib.parse import quote
+
 
 class InnerTube:
     """InnerTube API constants and payload builders.
@@ -12,6 +15,8 @@ class InnerTube:
     BROWSE_URL: str = 'https://www.youtube.com/youtubei/v1/browse'
     PLAYER_URL: str = 'https://www.youtube.com/youtubei/v1/player'
     NEXT_URL: str = 'https://www.youtube.com/youtubei/v1/next'
+    REEL_ITEM_URL: str = 'https://www.youtube.com/youtubei/v1/reel/reel_item_watch'
+    REEL_SEQUENCE_URL: str = 'https://www.youtube.com/youtubei/v1/reel/reel_watch_sequence'
     WATCH_URL: str = 'https://www.youtube.com/watch'
 
     # Base64-encoded protobuf tab params
@@ -20,6 +25,9 @@ class InnerTube:
     PLAYLISTS_TAB_PARAMS: str = 'EglwbGF5bGlzdHPyBgQKAkIA'
     STREAMS_TAB_PARAMS: str = 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D'
     SEARCH_TAB_PARAMS: str = 'EgZzZWFyY2jyBgQKAloA'
+    REEL_ITEM_PARAMS: str = 'CAUwAg%3D%3D'
+    HASHTAG_BROWSE_ID: str = 'FEhashtag'
+    HASHTAG_SHORTS_TAB: int = 3
 
     WEB_CLIENT: dict = {
         'hl': 'en',
@@ -235,4 +243,102 @@ class InnerTube:
         return {
             'context': {'client': InnerTube.WEB_CLIENT},
             'videoId': video_id,
+        }
+
+    # ── Shorts ──
+
+    @staticmethod
+    def build_continuation_payload(continuation: str) -> dict:
+        """Build payload for any continuation request (browse, next, reel)."""
+        return {
+            'context': {'client': InnerTube.WEB_CLIENT},
+            'continuation': continuation,
+        }
+
+    @staticmethod
+    def _varint(value: int) -> bytes:
+        result = bytearray()
+        while value > 0x7F:
+            result.append((value & 0x7F) | 0x80)
+            value >>= 7
+        result.append(value & 0x7F)
+        return bytes(result)
+
+    @staticmethod
+    def _bytes_field(field_number: int, value: bytes) -> bytes:
+        return (
+            InnerTube._varint((field_number << 3) | 2)
+            + InnerTube._varint(len(value)) + value
+        )
+
+    @staticmethod
+    def _varint_field(field_number: int, value: int) -> bytes:
+        return InnerTube._varint(field_number << 3) + InnerTube._varint(value)
+
+    @staticmethod
+    def build_hashtag_params(hashtag: str) -> str:
+        """Encode the browse params for a hashtag page's Shorts tab.
+
+        Protobuf: {93: {1: hashtag, 3: 3}} where 3 selects the Shorts tab.
+        """
+        inner = (
+            InnerTube._bytes_field(1, hashtag.encode('utf-8'))
+            + InnerTube._varint_field(3, InnerTube.HASHTAG_SHORTS_TAB)
+        )
+        encoded = base64.b64encode(InnerTube._bytes_field(93, inner)).decode('ascii')
+        return quote(encoded)
+
+    @staticmethod
+    def build_hashtag_shorts_payload(
+        hashtag: str,
+        continuation: str | None = None,
+    ) -> dict:
+        """Build payload for browsing the Shorts tab of a hashtag page."""
+        if continuation:
+            return InnerTube.build_continuation_payload(continuation)
+        return {
+            'context': {'client': InnerTube.WEB_CLIENT},
+            'browseId': InnerTube.HASHTAG_BROWSE_ID,
+            'params': InnerTube.build_hashtag_params(hashtag),
+        }
+
+    @staticmethod
+    def build_reel_item_payload(video_id: str) -> dict:
+        """Build payload for /youtubei/v1/reel/reel_item_watch.
+
+        Returns the Shorts player overlay, which carries the exact comment
+        count that the regular watch page only shows abbreviated.
+        """
+        return {
+            'context': {'client': InnerTube.WEB_CLIENT},
+            'playerRequest': {'videoId': video_id},
+            'params': InnerTube.REEL_ITEM_PARAMS,
+            'disablePlayerResponse': True,
+        }
+
+    @staticmethod
+    def build_reel_sequence_params(video_id: str) -> str:
+        """Encode sequence params that start a Shorts sequence at a video.
+
+        Protobuf: {1: video_id, 5: {3: 5}, 10: 25, 13: 0}.
+        """
+        data = (
+            InnerTube._bytes_field(1, video_id.encode('utf-8'))
+            + InnerTube._bytes_field(5, InnerTube._varint_field(3, 5))
+            + InnerTube._varint_field(10, 25)
+            + InnerTube._varint_field(13, 0)
+        )
+        return quote(base64.b64encode(data).decode('ascii'))
+
+    @staticmethod
+    def build_reel_sequence_payload(
+        sequence_params: str | None = None,
+        continuation: str | None = None,
+    ) -> dict:
+        """Build payload for /youtubei/v1/reel/reel_watch_sequence."""
+        if continuation:
+            return InnerTube.build_continuation_payload(continuation)
+        return {
+            'context': {'client': InnerTube.WEB_CLIENT},
+            'sequenceParams': sequence_params,
         }

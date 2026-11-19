@@ -52,6 +52,8 @@ class SearchFilter:
         'channel': 2,
         'playlist': 3,
         'movie': 4,
+        'short': 9,
+        'shorts': 9,
     }
 
     # Sub-field 3: Duration

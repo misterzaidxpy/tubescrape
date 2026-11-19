@@ -13,6 +13,7 @@ from tubescrape.models import (
     CommentsResult,
     PlaylistResult,
     SearchResult,
+    ShortResult,
     ShortsResult,
     Transcript,
     TranscriptListEntry,
@@ -111,7 +112,10 @@ class YouTube:
             sort_by: Sort order - 'relevance', 'upload_date', 'view_count', 'rating'.
             upload_date: Time filter - 'last_hour', 'today', 'this_week',
                          'this_month', 'this_year'.
-            type: Content type - 'video', 'channel', 'playlist', 'movie'.
+            type: Content type - 'video', 'channel', 'playlist', 'movie',
+                  'short'. With 'short' every result is a Short; those rows
+                  carry no channel or date, so pass them to get_videos_info()
+                  for full details.
             duration: Duration filter - 'short' (<4min), 'medium' (4-20min),
                       'long' (>20min).
             features: Feature filter(s) - 'live', '4k', 'hd', 'subtitles', 'cc',
@@ -124,6 +128,7 @@ class YouTube:
         Examples::
 
             yt.search('python tutorial')
+            yt.search('ai story', type='short')
             yt.search('podcast', type='video', duration='long')
             yt.search('news', upload_date='today', sort_by='view_count')
             yt.search('music', features=['4k', 'hdr'])
@@ -239,7 +244,7 @@ class YouTube:
     # ── Channel Shorts ──
 
     def get_channel_shorts(
-        self, channel: str, max_results: int = 0,
+        self, channel: str, max_results: int = 0, sort_by: str = 'latest',
     ) -> ShortsResult:
         """Get Shorts from a YouTube channel's Shorts tab.
 
@@ -247,22 +252,52 @@ class YouTube:
 
         Args:
             channel: Channel ID (UC...), @handle, or full YouTube channel URL.
-            max_results: Maximum number of shorts. Use 0 for all.
+            max_results: Maximum number of shorts. Use 0 for all; this pages
+                         through the whole tab, 48 Shorts per request.
+            sort_by: 'latest' (default), 'popular' or 'oldest'.
 
         Returns:
             ShortsResult containing the channel's shorts.
+
+        Examples::
+
+            yt.get_channel_shorts('@MrBeast', max_results=10, sort_by='popular')
         """
         channel_id = self._resolve_channel(channel)
-        return self._browse.get_channel_shorts(channel_id, max_results=max_results)
+        return self._browse.get_channel_shorts(
+            channel_id, max_results=max_results, sort_by=sort_by,
+        )
 
     async def aget_channel_shorts(
-        self, channel: str, max_results: int = 0,
+        self, channel: str, max_results: int = 0, sort_by: str = 'latest',
     ) -> ShortsResult:
         """Async version of get_channel_shorts."""
         channel_id = await self._aresolve_channel(channel)
         return await self._browse.aget_channel_shorts(
-            channel_id, max_results=max_results,
+            channel_id, max_results=max_results, sort_by=sort_by,
         )
+
+    # ── Hashtag Shorts ──
+
+    def get_hashtag_shorts(self, hashtag: str, max_results: int = 50) -> list[ShortResult]:
+        """Get Shorts from a hashtag page.
+
+        Args:
+            hashtag: Hashtag with or without the leading '#'.
+            max_results: Maximum number of shorts. Use 0 for all that
+                         YouTube serves, which can be thousands.
+
+        Returns:
+            List of ShortResult. These rows carry no channel or date, so pass
+            their IDs to get_videos_info() for full details.
+        """
+        return self._browse.get_hashtag_shorts(hashtag, max_results=max_results)
+
+    async def aget_hashtag_shorts(
+        self, hashtag: str, max_results: int = 50,
+    ) -> list[ShortResult]:
+        """Async version of get_hashtag_shorts."""
+        return await self._browse.aget_hashtag_shorts(hashtag, max_results=max_results)
 
     # ── Channel Playlists ──
 
@@ -498,6 +533,87 @@ class YouTube:
         """Async version of get_video_info."""
         video_id = URLParser.extract_video_id(video)
         return await self._transcript.aget_video_info(video_id, enrich=enrich)
+
+    def get_videos_info(
+        self,
+        videos: list,
+        enrich: bool = True,
+        concurrency: int = 5,
+    ) -> list[VideoInfo | None]:
+        """Fetch metadata for several videos at once.
+
+        Use this to fill in the channel, publish date and exact counts for
+        Shorts from get_channel_shorts(), get_hashtag_shorts() or a Shorts
+        search, where the listed rows only carry a title and a view count.
+
+        Args:
+            videos: Video IDs, URLs, or result objects that have a video_id
+                    (ShortResult, VideoResult).
+            enrich: Same meaning as in get_video_info.
+            concurrency: How many videos to fetch in parallel.
+
+        Returns:
+            One entry per input, in the same order. An entry is None when
+            that video could not be fetched.
+        """
+        return self._transcript.get_videos_info(
+            self._video_ids(videos), enrich=enrich, concurrency=concurrency,
+        )
+
+    async def aget_videos_info(
+        self,
+        videos: list,
+        enrich: bool = True,
+        concurrency: int = 5,
+    ) -> list[VideoInfo | None]:
+        """Async version of get_videos_info."""
+        return await self._transcript.aget_videos_info(
+            self._video_ids(videos), enrich=enrich, concurrency=concurrency,
+        )
+
+    @staticmethod
+    def _video_ids(videos: list) -> list[str]:
+        return [
+            URLParser.extract_video_id(getattr(video, 'video_id', video))
+            for video in videos
+        ]
+
+    # ── Related Shorts ──
+
+    def get_related_shorts(
+        self, short: str | ShortResult, max_results: int = 9,
+    ) -> list[VideoInfo]:
+        """Get the Shorts that YouTube plays after a given Short.
+
+        Every Short comes back with exact views, likes and publish time, at
+        about nine Shorts per request.
+
+        Args:
+            short: Video ID, URL, or a ShortResult. A ShortResult keeps the
+                   sequence inside the list it came from, such as one
+                   channel or one search.
+            max_results: Maximum number of Shorts to return.
+
+        Returns:
+            List of VideoInfo. Empty if YouTube returned no sequence.
+        """
+        listed = short if isinstance(short, ShortResult) else None
+        video_id = URLParser.extract_video_id(listed.video_id if listed else str(short))
+        return self._transcript.get_related_shorts(
+            video_id, max_results=max_results,
+            sequence_params=listed.sequence_params if listed else None,
+        )
+
+    async def aget_related_shorts(
+        self, short: str | ShortResult, max_results: int = 9,
+    ) -> list[VideoInfo]:
+        """Async version of get_related_shorts."""
+        listed = short if isinstance(short, ShortResult) else None
+        video_id = URLParser.extract_video_id(listed.video_id if listed else str(short))
+        return await self._transcript.aget_related_shorts(
+            video_id, max_results=max_results,
+            sequence_params=listed.sequence_params if listed else None,
+        )
 
     # ── Comments ──
 

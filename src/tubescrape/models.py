@@ -42,6 +42,7 @@ class VideoResult:
     description_snippet: str | None = None
     is_verified: bool = False
     badges: list[str] = field(default_factory=list)
+    views: int | None = None
 
     @property
     def channel_url(self) -> str | None:
@@ -78,6 +79,8 @@ class VideoResult:
             result['view_count'] = self.view_count
         if self.short_view_count is not None:
             result['short_view_count'] = self.short_view_count
+        if self.views is not None:
+            result['views'] = self.views
         if self.thumbnails:
             result['thumbnails'] = [t.to_dict() for t in self.thumbnails]
         if self.moving_thumbnail is not None:
@@ -281,6 +284,9 @@ class VideoInfo:
     is_family_safe: bool | None = None
     is_unlisted: bool | None = None
     owner_url: str | None = None
+    likes: int | None = None
+    is_short: bool | None = None
+    publish_date_utc: str | None = None
 
     @property
     def url(self) -> str:
@@ -303,6 +309,8 @@ class VideoInfo:
         }
         if self.like_count is not None:
             result['like_count'] = self.like_count
+        if self.likes is not None:
+            result['likes'] = self.likes
         if self.comment_count is not None:
             result['comment_count'] = self.comment_count
         if self.subscriber_count is not None:
@@ -313,6 +321,10 @@ class VideoInfo:
             result['publish_date'] = self.publish_date
         if self.upload_date is not None:
             result['upload_date'] = self.upload_date
+        if self.publish_date_utc is not None:
+            result['publish_date_utc'] = self.publish_date_utc
+        if self.is_short is not None:
+            result['is_short'] = self.is_short
         if self.category is not None:
             result['category'] = self.category
         result['thumbnail'] = self.thumbnail
@@ -454,12 +466,18 @@ class BrowseResult:
 
 @dataclass(frozen=True, slots=True)
 class ShortResult:
-    """A YouTube Short from a channel's Shorts tab."""
+    """A YouTube Short from a Shorts tab, a hashtag page or a Shorts sequence.
+
+    view_count is YouTube's display text ('27M views'); views is the same
+    value as an approximate integer.
+    """
 
     video_id: str
     title: str
     view_count: str | None = None
     thumbnail_url: str | None = None
+    views: int | None = None
+    sequence_params: str | None = field(default=None, repr=False)
 
     @property
     def url(self) -> str:
@@ -473,6 +491,8 @@ class ShortResult:
         }
         if self.view_count is not None:
             result['view_count'] = self.view_count
+        if self.views is not None:
+            result['views'] = self.views
         if self.thumbnail_url is not None:
             result['thumbnail_url'] = self.thumbnail_url
         return result
