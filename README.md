@@ -23,7 +23,8 @@
 ---
 
 - **Search** videos, channels, and shorts with filters: type, duration, upload date, sort order, features
-- **Video info** with views, likes, comment count, chapters, AI summary, and people mentioned
+- **Shorts**: every Short of a channel sorted by latest, popular, or oldest, a Shorts-only search, hashtag pages, and the "next Shorts" chain
+- **Video info** with exact views and likes, comment count, publish time in UTC, chapters, AI summary, and people mentioned
 - **Transcripts** in any available language, with translation and SRT/VTT/JSON export
 - **Comments** with replies, like counts, and hearted/verified/creator badges
 - **Channels**: videos, live streams, shorts, playlists, about page, and search within a channel
@@ -62,9 +63,10 @@ yt.search('podcast', type='video', duration='long')
 yt.search('news', upload_date='today', sort_by='view_count')
 yt.search('music', features=['4k', 'hdr'])
 yt.search('tech channels', type='channel')
+yt.search('ai story', type='short')
 ```
 
-Available filters: `sort_by` (`relevance`, `upload_date`, `view_count`, `rating`), `upload_date` (`last_hour`, `today`, `this_week`, `this_month`, `this_year`), `type` (`video`, `channel`, `playlist`, `movie`), `duration` (`short`, `medium`, `long`), and `features` (`live`, `4k`, `hd`, `subtitles`, `cc`, `creative_commons`, `360`, `vr180`, `3d`, `hdr`).
+Available filters: `sort_by` (`relevance`, `upload_date`, `view_count`, `rating`), `upload_date` (`last_hour`, `today`, `this_week`, `this_month`, `this_year`), `type` (`video`, `short`, `channel`, `playlist`, `movie`), `duration` (`short`, `medium`, `long`), and `features` (`live`, `4k`, `hd`, `subtitles`, `cc`, `creative_commons`, `360`, `vr180`, `3d`, `hdr`).
 
 ## Video info
 
@@ -76,6 +78,19 @@ info = yt.get_video_info('https://youtube.com/watch?v=dQw4w9WgXcQ')
 print(info.like_count, info.comment_count, info.ai_summary)
 for chapter in info.chapters:
     print(chapter.time_description, chapter.title)
+```
+
+`like_count` is YouTube's display text (`'19M'`). The exact number is in `likes`, next to `is_short` and `publish_date_utc`:
+
+```python
+print(info.likes, info.is_short, info.publish_date_utc)
+# 19512316 False 2009-10-25T06:57:33Z
+```
+
+To fetch many videos at once, pass IDs, URLs, or result objects to `get_videos_info`. Results come back in the same order, with `None` for any video that failed:
+
+```python
+infos = yt.get_videos_info(['dQw4w9WgXcQ', 'jNQXAC9IVRw'], concurrency=5)
 ```
 
 ## Transcripts
@@ -142,6 +157,44 @@ And you can search within a single channel:
 results = yt.search_channel('@lexfridman', 'machine learning')
 ```
 
+## Shorts
+
+A channel's Shorts tab is paged in full and can be sorted:
+
+```python
+shorts = yt.get_channel_shorts('@MrBeast')                              # all of them
+top = yt.get_channel_shorts('@MrBeast', max_results=10, sort_by='popular')
+
+for short in top.shorts:
+    print(short.title, short.view_count, short.views)                  # '1.9B views', 1900000000
+```
+
+`sort_by` accepts `latest` (default), `popular`, and `oldest`.
+
+Find Shorts by keyword or by hashtag:
+
+```python
+results = yt.search('ai story', type='short', max_results=40)          # every result is a Short
+tagged = yt.get_hashtag_shorts('#aiart')                               # about 36 per hashtag
+```
+
+YouTube lists a Short with only its title and a rounded view count. `get_videos_info` fills in the channel, exact views and likes, comment count, and publish time:
+
+```python
+infos = yt.get_videos_info(top.shorts)
+for info in infos:
+    print(info.channel, info.view_count, info.likes, info.comment_count, info.publish_date_utc)
+```
+
+`get_related_shorts` returns the Shorts YouTube plays after a given one. Each comes back with exact numbers already filled in, about nine per request:
+
+```python
+related = yt.get_related_shorts('https://www.youtube.com/shorts/sHpEqeSByPI')
+same_channel = yt.get_related_shorts(top.shorts[0])    # a listed Short stays inside its own list
+```
+
+A Short is also a regular video: `youtube.com/shorts/ID` and `youtube.com/watch?v=ID` are the same thing, so `get_video_info`, `get_transcript`, and `get_comments` all work on Shorts.
+
 ## Playlists
 
 ```python
@@ -202,7 +255,7 @@ Swagger docs at `http://localhost:8000/docs`.
 
 ## Hosted version: no-code or API
 
-Don't want to manage Python, proxies, or rate limits? The same engine runs as a hosted scraper on Apify with a point-and-click UI, scheduling, and exports to JSON/CSV/Excel:
+Don't want to manage Python, proxies, or rate limits? The same engine runs as a hosted scraper on Apify with a point-and-click UI, scheduling, and exports to JSON/CSV/Excel. It covers search, channels, Shorts, hashtags, playlists, transcripts, and comments:
 
 **[YouTube Scraper with Transcripts & Comments](https://apify.com/misterzaid.py/youtube-scraper)**
 

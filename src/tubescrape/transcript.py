@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from tubescrape._http import HTTPClient
 from tubescrape._innertube import InnerTube
@@ -79,7 +82,9 @@ class YouTubeTranscript:
             video_id: YouTube video ID (e.g. 'dQw4w9WgXcQ').
             enrich: If True (default), make a second /next API call to
                     fetch like_count, comment_count, subscriber_count,
-                    chapters, ai_summary, and people_mentioned.
+                    chapters, ai_summary, and people_mentioned. For a
+                    Short whose comment count is still missing, one more
+                    call reads the exact count from the Shorts player.
                     Set to False for a faster single-request call with
                     only basic metadata.
 
@@ -99,7 +104,9 @@ class YouTubeTranscript:
             return None
 
         if enrich:
-            return self._enrich_with_next(info, video_id)
+            info, exact = self._enrich_with_next(info, video_id)
+            if info.is_short and not exact:
+                info = self._enrich_with_reel(info, video_id)
         return info
 
     async def aget_video_info(
@@ -118,8 +125,166 @@ class YouTubeTranscript:
             return None
 
         if enrich:
-            return await self._aenrich_with_next(info, video_id)
+            info, exact = await self._aenrich_with_next(info, video_id)
+            if info.is_short and not exact:
+                info = await self._aenrich_with_reel(info, video_id)
         return info
+
+    # ── Bulk video info ──
+
+    def get_videos_info(
+        self, video_ids: list[str], enrich: bool = True, concurrency: int = 5,
+    ) -> list[VideoInfo | None]:
+        """Fetch metadata for several videos at once.
+
+        Args:
+            video_ids: YouTube video IDs.
+            enrich: Same meaning as in get_video_info.
+            concurrency: How many videos to fetch in parallel.
+
+        Returns:
+            One entry per input ID, in the same order. An entry is None when
+            that video could not be fetched.
+        """
+        def fetch(video_id: str) -> VideoInfo | None:
+            try:
+                return self.get_video_info(video_id, enrich=enrich)
+            except Exception as exc:
+                logger.warning('Video info failed for %s: %s', video_id, exc)
+                return None
+
+        if not video_ids:
+            return []
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+            return list(pool.map(fetch, video_ids))
+
+    async def aget_videos_info(
+        self, video_ids: list[str], enrich: bool = True, concurrency: int = 5,
+    ) -> list[VideoInfo | None]:
+        """Async version of get_videos_info."""
+        gate = asyncio.Semaphore(max(1, concurrency))
+
+        async def fetch(video_id: str) -> VideoInfo | None:
+            async with gate:
+                try:
+                    return await self.aget_video_info(video_id, enrich=enrich)
+                except Exception as exc:
+                    logger.warning('Video info failed for %s: %s', video_id, exc)
+                    return None
+
+        return list(await asyncio.gather(*(fetch(video_id) for video_id in video_ids)))
+
+    # ── Shorts sequence ──
+
+    def get_related_shorts(
+        self, video_id: str, max_results: int = 9, sequence_params: str | None = None,
+    ) -> list[VideoInfo]:
+        """Get the Shorts that YouTube plays after a given Short.
+
+        Each request returns about nine Shorts with exact views, likes and
+        publish time already filled in, so no per-video call is needed.
+
+        Args:
+            video_id: The Short to start from.
+            max_results: Maximum number of Shorts to return.
+            sequence_params: Optional sequence params taken from a listed
+                Short (ShortResult.sequence_params). They keep the sequence
+                inside the list the Short came from, such as one channel.
+
+        Returns:
+            List of VideoInfo. Empty if YouTube returned no sequence.
+        """
+        params = sequence_params or InnerTube.build_reel_sequence_params(video_id)
+        payload: dict | None = InnerTube.build_reel_sequence_payload(sequence_params=params)
+        videos: list[VideoInfo] = []
+        seen: set[str] = set()
+        while payload and len(videos) < max_results:
+            try:
+                response = self._http.post(
+                    InnerTube.REEL_SEQUENCE_URL, json=payload,
+                    params={'prettyPrint': 'false'},
+                )
+                page, continuation = ResponseParser.parse_reel_sequence(response.json())
+            except Exception as exc:
+                logger.warning('Shorts sequence failed: %s', exc)
+                break
+            fresh = [v for v in page if v.video_id not in seen and v.video_id != video_id]
+            if not fresh:
+                break
+            seen.update(v.video_id for v in fresh)
+            videos.extend(fresh)
+            payload = (
+                InnerTube.build_reel_sequence_payload(continuation=continuation)
+                if continuation else None
+            )
+        return videos[:max_results]
+
+    async def aget_related_shorts(
+        self, video_id: str, max_results: int = 9, sequence_params: str | None = None,
+    ) -> list[VideoInfo]:
+        """Async version of get_related_shorts."""
+        params = sequence_params or InnerTube.build_reel_sequence_params(video_id)
+        payload: dict | None = InnerTube.build_reel_sequence_payload(sequence_params=params)
+        videos: list[VideoInfo] = []
+        seen: set[str] = set()
+        while payload and len(videos) < max_results:
+            try:
+                response = await self._http.apost(
+                    InnerTube.REEL_SEQUENCE_URL, json=payload,
+                    params={'prettyPrint': 'false'},
+                )
+                page, continuation = ResponseParser.parse_reel_sequence(response.json())
+            except Exception as exc:
+                logger.warning('Shorts sequence failed: %s', exc)
+                break
+            fresh = [v for v in page if v.video_id not in seen and v.video_id != video_id]
+            if not fresh:
+                break
+            seen.update(v.video_id for v in fresh)
+            videos.extend(fresh)
+            payload = (
+                InnerTube.build_reel_sequence_payload(continuation=continuation)
+                if continuation else None
+            )
+        return videos[:max_results]
+
+    def _enrich_with_reel(self, info: VideoInfo, video_id: str) -> VideoInfo:
+        """Fill a Short's exact comment count from the Shorts player overlay."""
+        try:
+            response = self._http.post(
+                InnerTube.REEL_ITEM_URL,
+                json=InnerTube.build_reel_item_payload(video_id),
+                params={'prettyPrint': 'false'},
+            )
+            extra = ResponseParser.parse_reel_item(response.json())
+        except Exception as exc:
+            logger.warning('Failed to fetch Shorts overlay data: %s', exc)
+            return info
+        return self._apply_reel(info, extra)
+
+    async def _aenrich_with_reel(self, info: VideoInfo, video_id: str) -> VideoInfo:
+        """Async version of _enrich_with_reel."""
+        try:
+            response = await self._http.apost(
+                InnerTube.REEL_ITEM_URL,
+                json=InnerTube.build_reel_item_payload(video_id),
+                params={'prettyPrint': 'false'},
+            )
+            extra = ResponseParser.parse_reel_item(response.json())
+        except Exception as exc:
+            logger.warning('Failed to fetch Shorts overlay data: %s', exc)
+            return info
+        return self._apply_reel(info, extra)
+
+    @staticmethod
+    def _apply_reel(info: VideoInfo, extra: dict) -> VideoInfo:
+        if not extra:
+            return info
+        return dataclasses.replace(
+            info,
+            comment_count=extra.get('comment_count', info.comment_count),
+            likes=info.likes if info.likes is not None else extra.get('likes'),
+        )
 
     @staticmethod
     def _apply_engagement(info: VideoInfo, engagement: dict) -> VideoInfo:
@@ -136,8 +301,11 @@ class YouTubeTranscript:
             people_mentioned=engagement.get('people_mentioned', info.people_mentioned),
         )
 
-    def _enrich_with_next(self, info: VideoInfo, video_id: str) -> VideoInfo:
-        """Enrich VideoInfo with engagement data from the /next endpoint."""
+    def _enrich_with_next(self, info: VideoInfo, video_id: str) -> tuple[VideoInfo, bool]:
+        """Enrich VideoInfo with engagement data from the /next endpoint.
+
+        Returns (info, comment_count_is_exact).
+        """
         try:
             payload = InnerTube.build_next_payload(video_id=video_id)
             response = self._http.post(
@@ -148,13 +316,19 @@ class YouTubeTranscript:
             engagement = ResponseParser.parse_next_engagement(response.json())
         except Exception as exc:
             logger.warning('Failed to fetch engagement data: %s', exc)
-            return info
+            return info, False
 
         if engagement:
             info = self._apply_engagement(info, engagement)
-        return info
+        return info, self._comment_count_is_exact(engagement)
 
-    async def _aenrich_with_next(self, info: VideoInfo, video_id: str) -> VideoInfo:
+    @staticmethod
+    def _comment_count_is_exact(engagement: dict) -> bool:
+        return 'comment_count' in engagement and engagement.get('comment_count_exact', True)
+
+    async def _aenrich_with_next(
+        self, info: VideoInfo, video_id: str,
+    ) -> tuple[VideoInfo, bool]:
         """Async version of _enrich_with_next."""
         try:
             payload = InnerTube.build_next_payload(video_id=video_id)
@@ -166,11 +340,11 @@ class YouTubeTranscript:
             engagement = ResponseParser.parse_next_engagement(response.json())
         except Exception as exc:
             logger.warning('Failed to fetch engagement data: %s', exc)
-            return info
+            return info, False
 
         if engagement:
             info = self._apply_engagement(info, engagement)
-        return info
+        return info, self._comment_count_is_exact(engagement)
 
     # ── Comments ──
 

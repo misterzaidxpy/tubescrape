@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from contextlib import suppress
+from datetime import datetime, timezone
 from html import unescape
 from xml.etree import ElementTree
 
+from tubescrape._utils import TextParser
 from tubescrape.models import (
     ChannelAbout,
     ChannelLink,
@@ -223,6 +226,7 @@ class ResponseParser:
             description_snippet=description_snippet,
             is_verified=is_verified,
             badges=badges,
+            views=TextParser.parse_count(view_count_text or short_view_text, unit='view'),
         )
 
     @staticmethod
@@ -645,13 +649,18 @@ class ResponseParser:
             .get('playerMicroformatRenderer', {})
         )
 
+        # videoDetails.viewCount is missing in prefetched (Shorts sequence)
+        # player responses, so fall back to the microformat value.
+        view_count = vd.get('viewCount') or mf.get('viewCount')
+        like_count = mf.get('likeCount')
+
         return VideoInfo(
             video_id=vd.get('videoId', ''),
             title=vd.get('title', ''),
             channel=vd.get('author', ''),
             channel_id=vd.get('channelId', ''),
             description=vd.get('shortDescription', ''),
-            view_count=int(vd['viewCount']) if vd.get('viewCount') else 0,
+            view_count=int(view_count) if str(view_count or '').isdigit() else 0,
             duration_seconds=int(vd['lengthSeconds']) if vd.get('lengthSeconds') else 0,
             thumbnails=thumbnails,
             keywords=vd.get('keywords', []),
@@ -663,7 +672,97 @@ class ResponseParser:
             is_family_safe=mf.get('isFamilySafe'),
             is_unlisted=mf.get('isUnlisted'),
             owner_url=mf.get('ownerProfileUrl'),
+            likes=int(like_count) if str(like_count or '').isdigit() else None,
+            is_short=mf.get('isShortsEligible'),
+            publish_date_utc=ResponseParser._to_utc(mf.get('publishDate')),
         )
+
+    @staticmethod
+    def _to_utc(iso_date: str | None) -> str | None:
+        """Convert an ISO timestamp with an offset to UTC ('...Z')."""
+        if not iso_date or 'T' not in iso_date:
+            return None
+        try:
+            parsed = datetime.fromisoformat(iso_date)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    @staticmethod
+    def _find_by_accessibility_id(node: object, accessibility_id: str) -> dict | None:
+        """Depth-first search for the dict carrying a given accessibilityId."""
+        if isinstance(node, dict):
+            if node.get('accessibilityId') == accessibility_id:
+                return node
+            for value in node.values():
+                found = ResponseParser._find_by_accessibility_id(value, accessibility_id)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = ResponseParser._find_by_accessibility_id(value, accessibility_id)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def parse_reel_item(data: dict) -> dict:
+        """Parse exact engagement counts from a reel_item_watch response.
+
+        Returns a dict that may hold comment_count and likes. The Shorts
+        action bar exposes exact numbers in accessibility text, for example
+        'View 10,009 comments' and '380,191 likes'.
+        """
+        result: dict = {}
+        comment_button = ResponseParser._find_by_accessibility_id(data, 'id.reel_comment_button')
+        if comment_button:
+            count = TextParser.parse_count(
+                comment_button.get('accessibilityText'), unit='comment',
+            )
+            if count is not None:
+                result['comment_count'] = count
+        like_button = ResponseParser._find_by_accessibility_id(
+            data, 'id.reel_like_toggled_button',
+        )
+        if like_button:
+            count = TextParser.parse_count(like_button.get('accessibilityText'), unit='like')
+            if count is not None:
+                result['likes'] = count
+        return result
+
+    @staticmethod
+    def parse_reel_sequence(data: dict) -> tuple[list[VideoInfo], str | None]:
+        """Parse a reel_watch_sequence response.
+
+        Each entry carries a prefetched player response, so every Short comes
+        back with exact views, likes and publish time in a single request.
+
+        Returns (videos, continuation_token).
+        """
+        videos: list[VideoInfo] = []
+        for entry in data.get('entries', []):
+            endpoint = entry.get('command', {}).get('reelWatchEndpoint', {})
+            prefetch = endpoint.get('unserializedPrefetchData', {})
+            info = ResponseParser.parse_video_details(prefetch.get('playerResponse', {}))
+            if not info:
+                continue
+            extra = ResponseParser.parse_reel_item(prefetch.get('reelItemWatchResponse', {}))
+            if extra:
+                info = dataclasses.replace(
+                    info,
+                    comment_count=extra.get('comment_count', info.comment_count),
+                    likes=info.likes if info.likes is not None else extra.get('likes'),
+                )
+            videos.append(info)
+
+        continuation = (
+            data.get('continuationEndpoint', {})
+            .get('continuationCommand', {})
+            .get('token')
+        )
+        return videos, continuation
 
     @staticmethod
     def parse_translation_languages(raw: list[dict]) -> tuple[TranslationLanguage, ...]:
@@ -969,30 +1068,91 @@ class ResponseParser:
     @staticmethod
     def parse_shorts_tab(data: dict, channel_id: str) -> ShortsResult:
         """Parse a channel's Shorts tab response."""
-        shorts: list[ShortResult] = []
+        shorts, _, _ = ResponseParser.parse_shorts_page(data)
+        return ShortsResult(channel_id=channel_id, shorts=shorts)
 
+    @staticmethod
+    def parse_shorts_page(
+        data: dict,
+    ) -> tuple[list[ShortResult], str | None, dict[str, str]]:
+        """Parse the first page of a Shorts grid (channel tab or hashtag page).
+
+        Returns (shorts, continuation_token, sort_tokens). sort_tokens maps
+        the lowercased chip label ('latest', 'popular', 'oldest') to the
+        continuation token that reloads the grid in that order.
+        """
         try:
             tabs = data['contents']['twoColumnBrowseResultsRenderer']['tabs']
         except (KeyError, TypeError):
-            return ShortsResult(channel_id=channel_id)
+            return [], None, {}
 
         for tab in tabs:
             tr = tab.get('tabRenderer', {})
             if not tr.get('selected'):
                 continue
-            content = tr.get('content', {})
-            rich_grid = content.get('richGridRenderer', {})
-            for item in rich_grid.get('contents', []):
-                ri = item.get('richItemRenderer', {}).get('content', {})
-                lockup = ri.get('shortsLockupViewModel', {})
-                if not lockup:
-                    continue
+            rich_grid = tr.get('content', {}).get('richGridRenderer', {})
+            shorts, continuation = ResponseParser._parse_shorts_items(
+                rich_grid.get('contents', []),
+            )
+            sort_tokens: dict[str, str] = {}
+            chips = rich_grid.get('header', {}).get('chipBarViewModel', {}).get('chips', [])
+            for chip in chips:
+                vm = chip.get('chipViewModel', {})
+                token = (
+                    vm.get('tapCommand', {}).get('innertubeCommand', {})
+                    .get('continuationCommand', {}).get('token')
+                )
+                label = vm.get('text', '')
+                if token and label:
+                    sort_tokens[label.lower()] = token
+            return shorts, continuation, sort_tokens
 
-                short = ResponseParser._parse_short_lockup(lockup)
-                if short:
-                    shorts.append(short)
+        return [], None, {}
 
-        return ShortsResult(channel_id=channel_id, shorts=shorts)
+    @staticmethod
+    def parse_shorts_continuation(data: dict) -> tuple[list[ShortResult], str | None]:
+        """Parse a Shorts grid continuation or sort-reload response.
+
+        Paging answers with appendContinuationItemsAction; switching the sort
+        order answers with reloadContinuationItemsCommand (header and body).
+        """
+        shorts: list[ShortResult] = []
+        continuation: str | None = None
+        for action in data.get('onResponseReceivedActions', []):
+            items = (
+                action.get('appendContinuationItemsAction', {}).get('continuationItems')
+                or action.get('reloadContinuationItemsCommand', {}).get('continuationItems')
+                or []
+            )
+            page, token = ResponseParser._parse_shorts_items(items)
+            shorts.extend(page)
+            continuation = token or continuation
+        return shorts, continuation
+
+    @staticmethod
+    def _parse_shorts_items(items: list[dict]) -> tuple[list[ShortResult], str | None]:
+        """Parse richItemRenderer entries into shorts plus the next page token."""
+        shorts: list[ShortResult] = []
+        continuation: str | None = None
+        for item in items:
+            cont = item.get('continuationItemRenderer')
+            if cont:
+                continuation = (
+                    cont.get('continuationEndpoint', {})
+                    .get('continuationCommand', {})
+                    .get('token')
+                ) or continuation
+                continue
+            lockup = (
+                item.get('richItemRenderer', {}).get('content', {})
+                .get('shortsLockupViewModel')
+            )
+            if not lockup:
+                continue
+            short = ResponseParser._parse_short_lockup(lockup)
+            if short:
+                shorts.append(short)
+        return shorts, continuation
 
     @staticmethod
     def _parse_short_lockup(lockup: dict) -> ShortResult | None:
@@ -1006,6 +1166,9 @@ class ResponseParser:
         overlay = lockup.get('overlayMetadata', {})
         title = overlay.get('primaryText', {}).get('content', '')
         view_count = overlay.get('secondaryText', {}).get('content', '')
+        accessibility = lockup.get('accessibilityText', '')
+        if not title:
+            title = ResponseParser._short_title_from_accessibility(accessibility)
 
         thumb_vm = lockup.get('thumbnailViewModel', {}).get('thumbnailViewModel', {})
         sources = thumb_vm.get('image', {}).get('sources', [])
@@ -1016,7 +1179,31 @@ class ResponseParser:
             title=title,
             view_count=view_count or None,
             thumbnail_url=thumbnail_url,
+            views=ResponseParser._short_views(view_count, accessibility),
+            sequence_params=reel_ep.get('sequenceParams'),
         )
+
+    @staticmethod
+    def _short_title_from_accessibility(accessibility: str) -> str:
+        """Recover a Short's title from 'Title, 23 million views - play Short'.
+
+        Hashtag and sound pages omit the title from overlayMetadata.
+        """
+        if not accessibility:
+            return ''
+        return re.sub(
+            r',\s*(?:no|[\d.,]+\s*(?:thousand|million|billion|lakh|crore|[kmb])?)'
+            r'\s*views?\s*-\s*play short\s*$',
+            '', accessibility, flags=re.IGNORECASE,
+        ).strip()
+
+    @staticmethod
+    def _short_views(view_count: str, accessibility: str) -> int | None:
+        """Views of a listed Short as an int, from the overlay or accessibility text."""
+        views = TextParser.parse_count(view_count, unit='view')
+        if views is None:
+            views = TextParser.parse_count(accessibility, unit='view')
+        return views
 
     @staticmethod
     def _extract_shorts_from_shelf(item: dict) -> list[VideoResult]:
@@ -1045,6 +1232,9 @@ class ResponseParser:
             overlay = lockup.get('overlayMetadata', {})
             title = overlay.get('primaryText', {}).get('content', '')
             view_count = overlay.get('secondaryText', {}).get('content', '')
+            accessibility = lockup.get('accessibilityText', '')
+            if not title:
+                title = ResponseParser._short_title_from_accessibility(accessibility)
 
             # Thumbnail
             thumb_vm = lockup.get('thumbnailViewModel', {}).get('thumbnailViewModel', {})
@@ -1070,6 +1260,7 @@ class ResponseParser:
                 is_short=True,
                 view_count=view_count or None,
                 thumbnails=thumbnails,
+                views=ResponseParser._short_views(view_count, accessibility),
             ))
 
         return results
@@ -1447,10 +1638,16 @@ class ResponseParser:
             header = ep.get('header', {}).get('engagementPanelTitleHeaderRenderer', {})
             runs = header.get('contextualInfo', {}).get('runs', [])
             if runs:
-                with suppress(ValueError):
-                    result['comment_count'] = int(
-                        runs[0].get('text', '0').replace(',', '')
-                    )
+                count_text = runs[0].get('text', '0')
+                try:
+                    result['comment_count'] = int(count_text.replace(',', ''))
+                except ValueError:
+                    # Large counts are abbreviated ('2.4M'), so this value is
+                    # approximate. Shorts get the exact count separately.
+                    approximate = TextParser.parse_count(count_text)
+                    if approximate is not None:
+                        result['comment_count'] = approximate
+                        result['comment_count_exact'] = False
 
         # Comments continuation token from itemSectionRenderer
         for item in results:

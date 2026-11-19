@@ -13,6 +13,7 @@ from tubescrape.models import (
     ChannelAbout,
     ChannelPlaylistsResult,
     SearchResult,
+    ShortResult,
     ShortsResult,
     VideoResult,
 )
@@ -363,48 +364,188 @@ class YouTubeBrowse:
 
     # ── Shorts ──
 
+    SHORTS_SORT_ORDERS: tuple[str, ...] = ('latest', 'popular', 'oldest')
+
     def get_channel_shorts(
-        self, channel_id: str, max_results: int = 0,
+        self, channel_id: str, max_results: int = 0, sort_by: str = 'latest',
     ) -> ShortsResult:
         """Get Shorts from a channel's Shorts tab.
 
         Args:
             channel_id: YouTube channel ID (UC...).
             max_results: Maximum number of shorts to return. Use 0 for all.
+            sort_by: 'latest' (default), 'popular' or 'oldest'.
 
         Returns:
             ShortsResult containing the channel's shorts.
         """
+        sort_by = self._check_shorts_sort(sort_by)
         payload = InnerTube.build_shorts_payload(channel_id)
         response = self._http.post(
             InnerTube.BROWSE_URL, json=payload,
             params={'prettyPrint': 'false'},
         )
-        data = response.json()
-        result = ResponseParser.parse_shorts_tab(data, channel_id)
-        if max_results > 0 and len(result.shorts) > max_results:
-            result = ShortsResult(
-                channel_id=channel_id, shorts=result.shorts[:max_results],
-            )
-        logger.info('Shorts: %d shorts fetched for %s', len(result.shorts), channel_id)
-        return result
+        shorts, continuation, sort_tokens = ResponseParser.parse_shorts_page(response.json())
+
+        if sort_by != 'latest':
+            token = sort_tokens.get(sort_by)
+            if not token:
+                logger.warning('Shorts: no %r sort available for %s', sort_by, channel_id)
+                return ShortsResult(channel_id=channel_id)
+            # Switching the order reloads the grid from the first item.
+            shorts, continuation = [], token
+
+        page = 1
+        while continuation:
+            if max_results > 0 and len(shorts) >= max_results:
+                break
+            page += 1
+            try:
+                response = self._http.post(
+                    InnerTube.BROWSE_URL,
+                    json=InnerTube.build_continuation_payload(continuation),
+                    params={'prettyPrint': 'false'},
+                )
+                more, continuation = ResponseParser.parse_shorts_continuation(response.json())
+            except Exception as exc:
+                logger.warning('[page %d] Shorts continuation failed: %s', page, exc)
+                break
+            if not more:
+                break
+            shorts.extend(more)
+
+        if max_results > 0:
+            shorts = shorts[:max_results]
+        logger.info('Shorts: %d shorts fetched for %s (%s)', len(shorts), channel_id, sort_by)
+        return ShortsResult(channel_id=channel_id, shorts=shorts)
 
     async def aget_channel_shorts(
-        self, channel_id: str, max_results: int = 0,
+        self, channel_id: str, max_results: int = 0, sort_by: str = 'latest',
     ) -> ShortsResult:
         """Async version of get_channel_shorts."""
+        sort_by = self._check_shorts_sort(sort_by)
         payload = InnerTube.build_shorts_payload(channel_id)
         response = await self._http.apost(
             InnerTube.BROWSE_URL, json=payload,
             params={'prettyPrint': 'false'},
         )
-        data = response.json()
-        result = ResponseParser.parse_shorts_tab(data, channel_id)
-        if max_results > 0 and len(result.shorts) > max_results:
-            result = ShortsResult(
-                channel_id=channel_id, shorts=result.shorts[:max_results],
-            )
-        return result
+        shorts, continuation, sort_tokens = ResponseParser.parse_shorts_page(response.json())
+
+        if sort_by != 'latest':
+            token = sort_tokens.get(sort_by)
+            if not token:
+                logger.warning('Shorts: no %r sort available for %s', sort_by, channel_id)
+                return ShortsResult(channel_id=channel_id)
+            shorts, continuation = [], token
+
+        page = 1
+        while continuation:
+            if max_results > 0 and len(shorts) >= max_results:
+                break
+            page += 1
+            try:
+                response = await self._http.apost(
+                    InnerTube.BROWSE_URL,
+                    json=InnerTube.build_continuation_payload(continuation),
+                    params={'prettyPrint': 'false'},
+                )
+                more, continuation = ResponseParser.parse_shorts_continuation(response.json())
+            except Exception as exc:
+                logger.warning('[page %d] Shorts continuation failed: %s', page, exc)
+                break
+            if not more:
+                break
+            shorts.extend(more)
+
+        if max_results > 0:
+            shorts = shorts[:max_results]
+        return ShortsResult(channel_id=channel_id, shorts=shorts)
+
+    @classmethod
+    def _check_shorts_sort(cls, sort_by: str) -> str:
+        key = (sort_by or 'latest').lower()
+        if key not in cls.SHORTS_SORT_ORDERS:
+            valid = ', '.join(cls.SHORTS_SORT_ORDERS)
+            raise ValueError(f'Invalid sort_by: {sort_by!r}. Valid: {valid}')
+        return key
+
+    # ── Hashtag Shorts ──
+
+    def get_hashtag_shorts(self, hashtag: str, max_results: int = 50) -> list[ShortResult]:
+        """Get Shorts from a hashtag page's Shorts tab.
+
+        Args:
+            hashtag: Hashtag with or without the leading '#'.
+            max_results: Maximum number of shorts to return. Use 0 for all
+                         that YouTube serves, which can be thousands.
+
+        Returns:
+            List of ShortResult. Empty if the hashtag has no Shorts tab.
+        """
+        tag = hashtag.strip().lstrip('#')
+        response = self._http.post(
+            InnerTube.BROWSE_URL,
+            json=InnerTube.build_hashtag_shorts_payload(tag),
+            params={'prettyPrint': 'false'},
+        )
+        shorts, continuation, _ = ResponseParser.parse_shorts_page(response.json())
+
+        page = 1
+        while continuation:
+            if max_results > 0 and len(shorts) >= max_results:
+                break
+            page += 1
+            try:
+                response = self._http.post(
+                    InnerTube.BROWSE_URL,
+                    json=InnerTube.build_continuation_payload(continuation),
+                    params={'prettyPrint': 'false'},
+                )
+                more, continuation = ResponseParser.parse_shorts_continuation(response.json())
+            except Exception as exc:
+                logger.warning('[page %d] Hashtag continuation failed: %s', page, exc)
+                break
+            if not more:
+                break
+            shorts.extend(more)
+
+        if max_results > 0:
+            shorts = shorts[:max_results]
+        logger.info('Hashtag: %d shorts fetched for #%s', len(shorts), tag)
+        return shorts
+
+    async def aget_hashtag_shorts(self, hashtag: str, max_results: int = 50) -> list[ShortResult]:
+        """Async version of get_hashtag_shorts."""
+        tag = hashtag.strip().lstrip('#')
+        response = await self._http.apost(
+            InnerTube.BROWSE_URL,
+            json=InnerTube.build_hashtag_shorts_payload(tag),
+            params={'prettyPrint': 'false'},
+        )
+        shorts, continuation, _ = ResponseParser.parse_shorts_page(response.json())
+
+        page = 1
+        while continuation:
+            if max_results > 0 and len(shorts) >= max_results:
+                break
+            page += 1
+            try:
+                response = await self._http.apost(
+                    InnerTube.BROWSE_URL,
+                    json=InnerTube.build_continuation_payload(continuation),
+                    params={'prettyPrint': 'false'},
+                )
+                more, continuation = ResponseParser.parse_shorts_continuation(response.json())
+            except Exception as exc:
+                logger.warning('[page %d] Hashtag continuation failed: %s', page, exc)
+                break
+            if not more:
+                break
+            shorts.extend(more)
+
+        if max_results > 0:
+            shorts = shorts[:max_results]
+        return shorts
 
     # ── Channel Playlists ──
 

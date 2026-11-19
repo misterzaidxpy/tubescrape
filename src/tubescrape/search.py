@@ -67,7 +67,7 @@ class YouTubeSearch:
         result, continuation = ResponseParser.parse_search_response(
             data, query, max_results,
         )
-        all_videos = list(result.videos)
+        all_videos = self._unique_videos([], result.videos)
         all_channels = list(result.channels)
         total = len(all_videos) + len(all_channels)
         page = 1
@@ -104,6 +104,11 @@ class YouTubeSearch:
             )
             if not videos and not channels:
                 logger.info('[page %d] No more results, stopping', page)
+                break
+
+            # YouTube repeats some rows across pages, mostly in Shorts shelves.
+            videos = self._unique_videos(all_videos, videos)
+            if not videos and not channels:
                 break
 
             all_videos.extend(videos)
@@ -154,7 +159,7 @@ class YouTubeSearch:
         result, continuation = ResponseParser.parse_search_response(
             data, query, max_results,
         )
-        all_videos = list(result.videos)
+        all_videos = self._unique_videos([], result.videos)
         all_channels = list(result.channels)
         total = len(all_videos) + len(all_channels)
         page = 1
@@ -188,6 +193,11 @@ class YouTubeSearch:
             if not videos and not channels:
                 break
 
+            # YouTube repeats some rows across pages, mostly in Shorts shelves.
+            videos = self._unique_videos(all_videos, videos)
+            if not videos and not channels:
+                break
+
             all_videos.extend(videos)
             all_channels.extend(channels)
             total = len(all_videos) + len(all_channels)
@@ -199,6 +209,17 @@ class YouTubeSearch:
         return SearchResult(
             query=query, videos=all_videos, channels=all_channels,
         )
+
+    @staticmethod
+    def _unique_videos(existing: list, new: list) -> list:
+        """Return the videos in `new` whose IDs are not already collected."""
+        seen = {video.video_id for video in existing}
+        unique = []
+        for video in new:
+            if video.video_id not in seen:
+                seen.add(video.video_id)
+                unique.append(video)
+        return unique
 
     @staticmethod
     def _build_params(

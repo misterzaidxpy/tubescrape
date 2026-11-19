@@ -188,3 +188,66 @@ class URLParser:
         if value.startswith(('http://', 'https://', 'youtu.be/')):
             return True
         return 'youtube.com' in value
+
+
+class TextParser:
+    """Turn YouTube display text such as '27M views' into numbers."""
+
+    _MULTIPLIERS: dict[str, int] = {
+        'k': 1_000,
+        'thousand': 1_000,
+        'm': 1_000_000,
+        'million': 1_000_000,
+        'b': 1_000_000_000,
+        'billion': 1_000_000_000,
+        'lakh': 100_000,
+        'crore': 10_000_000,
+    }
+    _NUMBER: str = r'(\d[\d.,]*)\s*(thousand|million|billion|lakh|crore|[kmb])?'
+    _COUNT = re.compile(_NUMBER + r'(?![a-z])', re.IGNORECASE)
+
+    @classmethod
+    def parse_count(cls, text: str | None, unit: str | None = None) -> int | None:
+        """Parse a count out of display text.
+
+        Handles '27M views', '1.2K', '280 thousand views', '10,009 comments'
+        and 'No views'. Abbreviated values are approximate by nature.
+
+        Args:
+            text: Display text from YouTube.
+            unit: Optional singular unit ('view', 'like', 'comment'). When
+                  given, the number directly before that word is used, which
+                  matters for text that contains other numbers (titles).
+
+        Returns:
+            The count as an int, or None if no number was found.
+        """
+        if not text:
+            return None
+        lowered = text.strip().lower()
+
+        if unit:
+            pattern = re.compile(cls._NUMBER + r'\s+' + re.escape(unit) + r's?\b', re.IGNORECASE)
+            matches = pattern.findall(lowered)
+            if matches:
+                number, suffix = matches[-1]
+                return cls._to_int(number, suffix)
+            if re.search(r'\bno\s+' + re.escape(unit) + r's?\b', lowered):
+                return 0
+            return None
+
+        if re.fullmatch(r'no\s+(views?|likes?|comments?|subscribers?)', lowered):
+            return 0
+        match = cls._COUNT.search(lowered)
+        if not match:
+            return None
+        return cls._to_int(match.group(1), match.group(2))
+
+    @classmethod
+    def _to_int(cls, number: str, suffix: str | None) -> int | None:
+        cleaned = number.replace(',', '').rstrip('.')
+        try:
+            value = float(cleaned)
+        except ValueError:
+            return None
+        return int(round(value * cls._MULTIPLIERS.get((suffix or '').lower(), 1)))
